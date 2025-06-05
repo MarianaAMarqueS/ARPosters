@@ -43,26 +43,35 @@
     AFRAME.registerComponent('single-animation', {
         schema: {
             speed: {type: 'number', default: 0.3},
-            modelType: {type: 'string', default: ''}
+            modelType: {type: 'string', default: ''},
+            colorChangeSpeed: {type: 'number', default: 0.5}
         },
 
         init: function () {
             this.modelLoaded = false;
             this.animationActive = false;
             this.mixer = null;
+            this.materials = [];
+            this.originalColors = [];
+            this.colorProgress = 0;
 
             this.modelConfig = {
                 'flower': {
                     scale: {x: 1.5, y: 1.5, z: 1.5},
-                    position: {x: 0, y: -0.8, z: 0.5}
+                    position: {x: 0, y: -0.8, z: 0.5},
+                    targetColor: new THREE.Color('#424231'),
+                    shouldChangeColor: true
                 },
                 'oil': {
                     scale: {x: 1, y: 1, z: 1},
-                    position: {x: 0, y: -0.5, z: 0.5}
+                    position: {x: 0, y: -0.5, z: 0.5},
+                    shouldChangeColor: false // Não muda cor para o óleo
                 },
                 'butterfly': {
                     scale: {x: 3, y: 3, z: 3},
-                    position: {x: 0, y: -0.8, z: -2}
+                    position: {x: 0, y: -0.8, z: -2},
+                    targetColor: new THREE.Color('#433c36'),
+                    shouldChangeColor: true
                 }
             };
 
@@ -81,13 +90,31 @@
                 this.modelLoaded = true;
                 const model = el.getObject3D('mesh');
 
+                // Só coleta materiais se for para mudar a cor
+                if (config.shouldChangeColor) {
+                    model.traverse((node) => {
+                        if (node.isMesh && node.material) {
+                            // Converte para material básico se necessário
+                            if (node.material.isGLTFSpecularGlossinessMaterial) {
+                                node.material = new THREE.MeshStandardMaterial({
+                                    color: node.material.color,
+                                    map: node.material.map
+                                });
+                            }
+
+                            this.materials.push(node.material);
+                            this.originalColors.push(node.material.color.clone());
+                        }
+                    });
+                }
+
                 // Configura animações do GLTF
                 if (model.animations && model.animations.length > 0) {
                     this.mixer = new THREE.AnimationMixer(model);
                     this.actions = model.animations.map(anim => {
                         const action = this.mixer.clipAction(anim);
-                        action.setLoop(THREE.LoopOnce); // Executa apenas UMA vez
-                        action.clampWhenFinished = true; // Mantém a última posição
+                        action.setLoop(THREE.LoopOnce);
+                        action.clampWhenFinished = true;
                         return action;
                     });
                 }
@@ -96,13 +123,14 @@
 
         setupEvents: function() {
             const parent = this.el.parentEl;
+            const config = this.modelConfig[this.data.modelType];
 
             parent.addEventListener('targetFound', () => {
                 if (!this.modelLoaded || this.animationActive) return;
 
                 this.animationActive = true;
+                this.colorProgress = 0;
 
-                // Reinicia e executa todas as animações
                 if (this.mixer) {
                     this.mixer.time = 0;
                     this.actions.forEach(action => {
@@ -110,33 +138,72 @@
                         action.play();
                     });
 
-                    // Atualiza o mixer manualmente até a animação terminar
                     this.clock = new THREE.Clock();
-                    this.animationId = requestAnimationFrame(this.updateMixer.bind(this));
+                    this.animationId = requestAnimationFrame(this.updateAnimation.bind(this));
                 }
+            });
+
+            parent.addEventListener('targetLost', () => {
+                if (config.shouldChangeColor) {
+                    this.restoreOriginalColors();
+                }
+                this.animationActive = false;
             });
         },
 
-        updateMixer: function() {
+        updateAnimation: function() {
+            if (!this.animationActive) return;
+
+            const delta = this.clock.getDelta();
+            const config = this.modelConfig[this.data.modelType];
+
             if (this.mixer) {
-                const delta = this.clock.getDelta();
                 this.mixer.update(delta);
-
-                // Verifica se todas as animações terminaram
-                const allFinished = this.actions.every(action => action.paused);
-
-                if (!allFinished) {
-                    this.animationId = requestAnimationFrame(this.updateMixer.bind(this));
-                } else {
-                    this.animationActive = false;
-                }
             }
+
+            // Atualiza cores apenas para flower e butterfly
+            if (config.shouldChangeColor) {
+                this.updateColors(delta);
+            }
+
+            const animationFinished = this.actions.every(action => action.paused);
+
+            if (!animationFinished || (config.shouldChangeColor && this.colorProgress < 1)) {
+                this.animationId = requestAnimationFrame(this.updateAnimation.bind(this));
+            } else {
+                this.animationActive = false;
+            }
+        },
+
+        updateColors: function(delta) {
+            if (this.materials.length === 0) return;
+
+            const config = this.modelConfig[this.data.modelType];
+            this.colorProgress = Math.min(1, this.colorProgress + delta * this.data.colorChangeSpeed);
+
+            // Interpola entre a cor original e a cor alvo
+            this.materials.forEach((material, index) => {
+                material.color.lerpColors(
+                    this.originalColors[index],
+                    config.targetColor,
+                    this.colorProgress
+                );
+                material.needsUpdate = true;
+            });
+        },
+
+        restoreOriginalColors: function() {
+            this.materials.forEach((material, index) => {
+                material.color.copy(this.originalColors[index]);
+                material.needsUpdate = true;
+            });
         },
 
         remove: function() {
             if (this.animationId) {
                 cancelAnimationFrame(this.animationId);
             }
+            this.restoreOriginalColors();
         }
     });
 </script>
